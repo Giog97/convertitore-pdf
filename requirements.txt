@@ -1,0 +1,5 @@
+Pillow>=10.0
+comtypes>=1.2 ; platform_system == "Windows"
+tkinterdnd2>=0.4
+pypdf>=4.0
+pypdfium2>=4.0
