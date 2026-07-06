@@ -50,6 +50,12 @@ def main():
         "--collect-all", "tkinterdnd2",
         "--collect-all", "pypdfium2",
         "--collect-all", "pypdfium2_raw",
+        # conversione docx -> pdf senza Word
+        "--collect-all", "xhtml2pdf",
+        "--collect-all", "reportlab",
+        "--collect-all", "mammoth",
+        "--collect-all", "svglib",
+        "--collect-all", "html5lib",
     ]
     if tcl_data:
         args += ["--add-data", f"{tcl_data}{SEP}_tcl_data"]

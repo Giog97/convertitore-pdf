@@ -7,7 +7,7 @@ Applicazione desktop con interfaccia grafica (due schede) per:
     unione, formato pagina)
   * Dividere un PDF in piu' file (con anteprima delle pagine)
 
-Immagini -> Pillow | Word -> Microsoft Word (automazione COM)
+Immagini -> Pillow | Word (.docx) -> mammoth + xhtml2pdf (senza Microsoft Word)
 Dividi/Unisci PDF -> pypdf | Anteprima PDF -> pypdfium2
 Interfaccia disponibile in Italiano e Inglese.
 """
@@ -20,7 +20,6 @@ import tempfile
 import threading
 import traceback
 from pathlib import Path
-from contextlib import nullcontext
 
 
 def _fix_tcl_tk():
@@ -49,10 +48,11 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
 try:
-    from PIL import Image, ImageTk
+    from PIL import Image, ImageTk, ImageOps
 except Exception:
     Image = None
     ImageTk = None
+    ImageOps = None
 
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -74,6 +74,13 @@ try:
 except Exception:
     PDFIUM_AVAILABLE = False
 
+try:
+    import mammoth
+    from xhtml2pdf import pisa as _pisa
+    DOCX_AVAILABLE = True
+except Exception:
+    DOCX_AVAILABLE = False
+
 
 # ---------------------------------------------------------------------------
 # Palette e costanti
@@ -91,8 +98,22 @@ IMAGE_EXTS = {
     ".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tif", ".tiff",
     ".webp", ".ico", ".ppm", ".pgm", ".pnm", ".jfif",
 }
-WORD_EXTS = {".doc", ".docx", ".docm", ".rtf", ".odt"}
-SUPPORTED_EXTS = IMAGE_EXTS | WORD_EXTS
+# Documenti Word convertiti senza Microsoft Word (mammoth + xhtml2pdf)
+DOC_EXTS = {".docx", ".docm"}
+SUPPORTED_EXTS = IMAGE_EXTS | DOC_EXTS
+
+# Foglio di stile e mappatura usati per la conversione dei documenti
+DOCX_STYLE_MAP = (
+    "p[style-name='Title'] => h1:fresh\n"
+    "p[style-name='Subtitle'] => h2:fresh"
+)
+DOCX_CSS = (
+    "@page { size: A4; margin: 2cm; }"
+    "body { font-family: Helvetica, Arial, sans-serif; font-size: 11pt; line-height: 1.4; }"
+    "h1 { font-size: 20pt; } h2 { font-size: 16pt; } h3 { font-size: 13pt; }"
+    "table, td, th { border: 1px solid #888; border-collapse: collapse; padding: 4px; }"
+    "img { max-width: 100%; }"
+)
 
 PAGE_DPI = 150
 PAGE_SIZES = {
@@ -119,7 +140,8 @@ TR = {
         "c_clear": "Svuota",
         "c_preview_title": "Anteprima del PDF risultante",
         "c_preview_select": "Seleziona un file\nper vedere l'anteprima",
-        "c_preview_generating": "Generazione anteprima…\n(apertura di Word)",
+        "c_preview_generating": "Generazione anteprima\ndel documento…",
+        "c_rotate": "Ruota:",
         "c_opts_title": "2 · Opzioni",
         "c_save_to": "Salva in:",
         "c_out_default": "Stessa cartella dei file di origine",
@@ -134,7 +156,7 @@ TR = {
         "open_folder": "📂 Apri cartella",
         "c_ready": "Pronto. Aggiungi i file e premi \"Converti in PDF\".",
         "c_info_img": "{name}\n{w}×{h} px · {size}",
-        "c_info_word": "{name}\nPDF da Word · {size}",
+        "c_info_word": "{name}\nDocumento Word · {size}",
         "m_added": "Aggiunti {n} file.",
         "m_ignored": "Ignorati {n} file con formato non supportato.",
         "m_no_files_title": "Nessun file",
@@ -199,7 +221,8 @@ TR = {
         "c_clear": "Clear",
         "c_preview_title": "Preview of the resulting PDF",
         "c_preview_select": "Select a file\nto see the preview",
-        "c_preview_generating": "Generating preview…\n(opening Word)",
+        "c_preview_generating": "Generating document\npreview…",
+        "c_rotate": "Rotate:",
         "c_opts_title": "2 · Options",
         "c_save_to": "Save to:",
         "c_out_default": "Same folder as source files",
@@ -214,7 +237,7 @@ TR = {
         "open_folder": "📂 Open folder",
         "c_ready": "Ready. Add files and press \"Convert to PDF\".",
         "c_info_img": "{name}\n{w}×{h} px · {size}",
-        "c_info_word": "{name}\nPDF from Word · {size}",
+        "c_info_word": "{name}\nWord document · {size}",
         "m_added": "Added {n} file(s).",
         "m_ignored": "Ignored {n} file(s) with unsupported format.",
         "m_no_files_title": "No files",
@@ -273,8 +296,8 @@ def kind_of(path: Path) -> str:
     ext = path.suffix.lower()
     if ext in IMAGE_EXTS:
         return "image"
-    if ext in WORD_EXTS:
-        return "word"
+    if ext in DOC_EXTS:
+        return "docx"
     if ext == ".pdf":
         return "pdf"
     return "unknown"
@@ -319,6 +342,12 @@ def _prepare_image(path: Path) -> "Image.Image":
     img = Image.open(path)
     if getattr(img, "is_animated", False):
         img.seek(0)
+    # Applica l'orientamento EXIF (molte foto da telefono si raddrizzano da sole)
+    if ImageOps is not None:
+        try:
+            img = ImageOps.exif_transpose(img)
+        except Exception:
+            pass
     if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
         background = Image.new("RGB", img.size, (255, 255, 255))
         rgba = img.convert("RGBA")
@@ -341,67 +370,54 @@ def _fit_on_page(img: "Image.Image", page_px, margin=0.04) -> "Image.Image":
     return page
 
 
-def image_page(path: Path, page_key="fit") -> "Image.Image":
-    """Costruisce l'immagine della pagina PDF risultante (usata anche per l'anteprima)."""
+def image_page(path: Path, page_key="fit", angle=0) -> "Image.Image":
+    """Costruisce l'immagine della pagina PDF risultante (usata anche per l'anteprima).
+
+    angle: rotazione in gradi in senso orario (0/90/180/270).
+    """
     img = _prepare_image(path)
+    if angle % 360:
+        img = img.rotate(-angle, expand=True)   # PIL ruota in senso antiorario
     size = PAGE_SIZES.get(page_key)
     return _fit_on_page(img, size) if size else img
 
 
-def image_to_pdf(input_path: Path, output_path: Path, page_key="fit") -> None:
-    page = image_page(input_path, page_key)
+def image_to_pdf(input_path: Path, output_path: Path, page_key="fit", angle=0) -> None:
+    page = image_page(input_path, page_key, angle)
     res = PAGE_DPI if PAGE_SIZES.get(page_key) else 100.0
     page.save(output_path, "PDF", resolution=res)
 
 
 # ---------------------------------------------------------------------------
-# Conversione WORD -> PDF (automazione Microsoft Word)
+# Conversione WORD (.docx/.docm) -> PDF  SENZA Microsoft Word
+# (mammoth: docx -> HTML | xhtml2pdf: HTML -> PDF)
 # ---------------------------------------------------------------------------
-WD_EXPORT_FORMAT_PDF = 17
+def docx_to_pdf(input_path: Path, output_path: Path) -> None:
+    if not DOCX_AVAILABLE:
+        raise RuntimeError("Librerie mammoth/xhtml2pdf non disponibili")
+    with open(input_path, "rb") as f:
+        html = mammoth.convert_to_html(f, style_map=DOCX_STYLE_MAP).value
+    full = (f"<html><head><meta charset='utf-8'><style>{DOCX_CSS}</style></head>"
+            f"<body>{html}</body></html>")
+    with open(output_path, "wb") as out:
+        status = _pisa.CreatePDF(full, dest=out, encoding="utf-8")
+    if getattr(status, "err", 0):
+        raise RuntimeError("Errore nella conversione del documento")
 
 
-class WordConverter:
-    def __init__(self):
-        self.word = None
-        self._com = False
-
-    def __enter__(self):
-        import comtypes
-        import comtypes.client
-        comtypes.CoInitialize()
-        self._com = True
-        self.word = comtypes.client.CreateObject("Word.Application")
-        self.word.Visible = False
-        try:
-            self.word.DisplayAlerts = 0
-        except Exception:
-            pass
-        return self
-
-    def convert(self, input_path: Path, output_path: Path) -> None:
-        doc = self.word.Documents.Open(
-            str(input_path), ConfirmConversions=False,
-            ReadOnly=True, AddToRecentFiles=False,
-        )
-        try:
-            doc.ExportAsFixedFormat(str(output_path), WD_EXPORT_FORMAT_PDF)
-        finally:
-            doc.Close(False)
-
-    def __exit__(self, *exc):
-        try:
-            if self.word is not None:
-                self.word.Quit()
-        except Exception:
-            pass
-        finally:
-            if self._com:
-                try:
-                    import comtypes
-                    comtypes.CoUninitialize()
-                except Exception:
-                    pass
-        return False
+def rotate_pdf_pages(path: Path, angle: int) -> None:
+    """Ruota tutte le pagine di un PDF (in senso orario, multipli di 90)."""
+    if angle % 360 == 0:
+        return
+    reader = PdfReader(str(path))
+    writer = PdfWriter()
+    for page in reader.pages:
+        page.rotate(angle)
+        writer.add_page(page)
+    tmp = Path(str(path) + ".tmp")
+    with open(tmp, "wb") as f:
+        writer.write(f)
+    os.replace(tmp, path)
 
 
 # ---------------------------------------------------------------------------
@@ -620,10 +636,11 @@ class ConvertTab(TaskFrame):
         self._preview_photo = None
         self._current_pil = None
         self._resize_job = None
-        self._preview_cache = {}      # {(path, mtime): PIL Image | None}
+        self._preview_cache = {}      # {(path, mtime): PIL Image | None}  (pagina docx non ruotata)
         self._preview_seq = 0
         self._preview_lock = threading.Lock()
         self._drag_index = None       # indice della voce trascinata per il riordino
+        self._rotation = {}           # {str(path): angolo orario 0/90/180/270}
         self.scale = getattr(self.winfo_toplevel(), "scale", 1.0)
         self.pw = int(self.PREVIEW_W * self.scale)
         self.ph = int(self.PREVIEW_H * self.scale)
@@ -686,6 +703,21 @@ class ConvertTab(TaskFrame):
                                     font=("Segoe UI", 11), justify="center")
         self.preview_img.pack(expand=True)
         self.preview_box.bind("<Configure>", self._on_box_resize)
+        # Pulsanti di rotazione (applicati anche al PDF finale)
+        rot = tk.Frame(prev_card, bg=CARD)
+        rot.pack(pady=(0, 2))
+        tk.Label(rot, text=self.t("c_rotate"), bg=CARD, fg=MUTED,
+                 font=("Segoe UI", 9)).pack(side="left", padx=(0, 4))
+        b_left = tk.Button(rot, text="⟲", command=lambda: self._rotate(-90),
+                           bg="#EDF0F6", fg=TEXT, activebackground="#DCE2EE",
+                           relief="flat", bd=0, font=("Segoe UI", 12), padx=10,
+                           pady=2, cursor="hand2")
+        b_left.pack(side="left", padx=2)
+        b_right = tk.Button(rot, text="⟳", command=lambda: self._rotate(90),
+                            bg="#EDF0F6", fg=TEXT, activebackground="#DCE2EE",
+                            relief="flat", bd=0, font=("Segoe UI", 12), padx=10,
+                            pady=2, cursor="hand2")
+        b_right.pack(side="left", padx=2)
         self.preview_info = tk.Label(prev_card, text="", bg=CARD, fg=TEXT,
                                      font=("Segoe UI", 9), justify="center",
                                      wraplength=self.pw)
@@ -769,9 +801,9 @@ class ConvertTab(TaskFrame):
         filetypes = [
             ("Immagini / Word",
              "*.jpg *.jpeg *.png *.bmp *.gif *.tif *.tiff *.webp *.ico *.jfif "
-             "*.doc *.docx *.docm *.rtf *.odt"),
+             "*.docx *.docm"),
             ("Immagini", "*.jpg *.jpeg *.png *.bmp *.gif *.tif *.tiff *.webp *.ico *.jfif"),
-            ("Word", "*.doc *.docx *.docm *.rtf *.odt"),
+            ("Word (.docx)", "*.docx *.docm"),
             ("Tutti i file / All files", "*.*"),
         ]
         paths = filedialog.askopenfilenames(title=self.t("c_add"), filetypes=filetypes)
@@ -781,7 +813,7 @@ class ConvertTab(TaskFrame):
         return "🖼" if kind_of(path) == "image" else "📄"
 
     def _add_one(self, path: Path) -> bool:
-        if kind_of(path) not in ("image", "word") or path in self.files:
+        if kind_of(path) not in ("image", "docx") or path in self.files:
             return False
         self.files.append(path)
         self.listbox.insert(tk.END, f"  {self._icon_for(path)}  {path.name}")
@@ -797,7 +829,7 @@ class ConvertTab(TaskFrame):
                 continue
             if not path.is_file():
                 continue
-            if kind_of(path) not in ("image", "word"):
+            if kind_of(path) not in ("image", "docx"):
                 skipped += 1
                 continue
             if self._add_one(path):
@@ -939,10 +971,14 @@ class ConvertTab(TaskFrame):
         kind = kind_of(path)
         page_key = self.page_var.get()
 
+        angle = self._rotation.get(str(path), 0)
+
         if kind == "image" and Image and ImageTk:
             try:
                 base = _prepare_image(path)
                 w, h = base.size
+                if angle % 360:
+                    base = base.rotate(-angle, expand=True)
                 size = PAGE_SIZES.get(page_key)
                 page_img = _fit_on_page(base, size) if size else base
                 self._show_pil(page_img, self.t("c_info_img", name=path.name, w=w, h=h,
@@ -951,54 +987,58 @@ class ConvertTab(TaskFrame):
                 self._placeholder(self.t("c_preview_select"))
             return
 
-        if kind == "word":
-            # anteprima reale del PDF generato da Word (in background, con cache)
-            if not (PDFIUM_AVAILABLE and Image and ImageTk):
-                self._word_info_placeholder(path)
+        if kind == "docx":
+            # anteprima reale del PDF, generato SENZA Word (in background, con cache)
+            if not (PDFIUM_AVAILABLE and DOCX_AVAILABLE and Image and ImageTk):
+                self._doc_info_placeholder(path)
                 return
             key = self._cache_key(path)
             if key in self._preview_cache:
-                img = self._preview_cache[key]
-                if img is not None:
-                    self._show_pil(img, self.t("c_info_word", name=path.name, size=human_size(path)))
+                base = self._preview_cache[key]
+                if base is not None:
+                    self._show_docx(base, path)
                 else:
-                    self._word_info_placeholder(path)
+                    self._doc_info_placeholder(path)
                 return
             if self.worker and self.worker.is_alive():
-                # conversione in corso: evito una seconda istanza di Word
-                self._word_info_placeholder(path)
+                # conversione in corso: evito conversioni PDF concorrenti
+                self._doc_info_placeholder(path)
                 return
             self._placeholder(self.t("c_preview_generating"))
             self._preview_seq += 1
-            threading.Thread(target=self._make_word_preview,
+            threading.Thread(target=self._make_doc_preview,
                              args=(path, key, self._preview_seq), daemon=True).start()
             return
 
         self._placeholder(self.t("c_preview_select"))
 
-    def _word_info_placeholder(self, path):
+    def _show_docx(self, base_pil, path):
+        angle = self._rotation.get(str(path), 0)
+        disp = base_pil.rotate(-angle, expand=True) if angle % 360 else base_pil
+        self._show_pil(disp, self.t("c_info_word", name=path.name, size=human_size(path)))
+
+    def _doc_info_placeholder(self, path):
         self._placeholder("📄", big=True)
         self.preview_info.config(text=self.t("c_info_word", name=path.name, size=human_size(path)))
 
-    def _make_word_preview(self, path, key, seq):
-        img = None
+    def _make_doc_preview(self, path, key, seq):
+        base = None
         try:
             with self._preview_lock:
                 tmp = tempfile.mkdtemp(prefix="prev_")
                 out = Path(tmp) / "p.pdf"
-                with WordConverter() as wc:
-                    wc.convert(path, out)
-                img = render_pdf_page(out, 0, scale=1.5)
+                docx_to_pdf(path, out)
+                base = render_pdf_page(out, 0, scale=1.5)
                 shutil.rmtree(tmp, ignore_errors=True)
         except Exception:
-            img = None
-        self.msg_queue.put(("wpreview", (key, seq, img)))
+            base = None
+        self.msg_queue.put(("dpreview", (key, seq, base)))
 
     def _extra_message(self, kind, payload):
-        if kind != "wpreview":
+        if kind != "dpreview":
             return
-        key, seq, img = payload
-        self._preview_cache[key] = img
+        key, seq, base = payload
+        self._preview_cache[key] = base
         if seq != self._preview_seq:
             return
         i = self._selected_index()
@@ -1007,10 +1047,18 @@ class ConvertTab(TaskFrame):
         path = self.files[i]
         if self._cache_key(path) != key:
             return
-        if img is not None:
-            self._show_pil(img, self.t("c_info_word", name=path.name, size=human_size(path)))
+        if base is not None:
+            self._show_docx(base, path)
         else:
-            self._word_info_placeholder(path)
+            self._doc_info_placeholder(path)
+
+    def _rotate(self, delta):
+        i = self._selected_index()
+        if i is None or i >= len(self.files):
+            return
+        path = self.files[i]
+        self._rotation[str(path)] = (self._rotation.get(str(path), 0) + delta) % 360
+        self._update_preview()
 
     # -- Stato (per il cambio lingua) --------------------------------------
     def get_state(self):
@@ -1020,6 +1068,7 @@ class ConvertTab(TaskFrame):
             "merge": self.merge_var.get(),
             "page": self.page_var.get(),
             "sel": self._selected_index(),
+            "rotation": dict(self._rotation),
         }
 
     def set_state(self, s):
@@ -1029,6 +1078,7 @@ class ConvertTab(TaskFrame):
             self.out_var.set(str(self.output_dir))
         self.merge_var.set(s.get("merge", False))
         self.page_var.set(s.get("page", "fit"))
+        self._rotation = dict(s.get("rotation", {}))
         self._refresh_list(select=s.get("sel"))
 
     # -- Avvio conversione --------------------------------------------------
@@ -1044,45 +1094,41 @@ class ConvertTab(TaskFrame):
         self.convert_btn.config(state="disabled")
         self._clear_log()
         self.start_worker(self._work, list(self.files), self.output_dir,
-                          self.merge_var.get(), self.page_var.get())
+                          self.merge_var.get(), self.page_var.get(), dict(self._rotation))
 
-    def _work(self, files, out_dir, merge, page_key):
+    def _work(self, files, out_dir, merge, page_key, rotation):
         q = self.msg_queue
         q.put(("progress_max", len(files) + (1 if merge else 0)))
         errors, done, last_folder = 0, 0, None
-        words_present = any(kind_of(p) == "word" for p in files)
 
-        def convert_one(path, target, wc):
+        def convert_one(path, target):
             k = kind_of(path)
+            angle = rotation.get(str(path), 0)
             if k == "image":
-                image_to_pdf(path, target, page_key)
-            elif k == "word":
-                if wc is None:
-                    raise RuntimeError("Word non disponibile")
-                wc.convert(path, target)
+                image_to_pdf(path, target, page_key, angle)
+            elif k == "docx":
+                docx_to_pdf(path, target)
+                if angle % 360:
+                    rotate_pdf_pages(target, angle)
             else:
                 raise RuntimeError("formato non supportato")
 
         try:
-            wc_ctx = WordConverter() if words_present else nullcontext()
             if merge:
                 tmp = tempfile.mkdtemp(prefix="conv_")
                 temp_pdfs = []
                 try:
-                    if words_present:
-                        q.put(("log", self.t("m_start_word")))
-                    with wc_ctx as wc:
-                        for idx, p in enumerate(files):
-                            tp = Path(tmp) / f"{idx:04d}.pdf"
-                            try:
-                                convert_one(p, tp, wc)
-                                temp_pdfs.append(tp)
-                                q.put(("log", self.t("m_ok_simple", name=p.name)))
-                            except Exception as e:
-                                errors += 1
-                                q.put(("log", self.t("m_error_file", name=p.name, e=e)))
-                            done += 1
-                            q.put(("progress", done))
+                    for idx, p in enumerate(files):
+                        tp = Path(tmp) / f"{idx:04d}.pdf"
+                        try:
+                            convert_one(p, tp)
+                            temp_pdfs.append(tp)
+                            q.put(("log", self.t("m_ok_simple", name=p.name)))
+                        except Exception as e:
+                            errors += 1
+                            q.put(("log", self.t("m_error_file", name=p.name, e=e)))
+                        done += 1
+                        q.put(("progress", done))
                     if temp_pdfs:
                         folder = out_dir or files[0].parent
                         folder.mkdir(parents=True, exist_ok=True)
@@ -1095,26 +1141,22 @@ class ConvertTab(TaskFrame):
                 finally:
                     shutil.rmtree(tmp, ignore_errors=True)
             else:
-                if words_present:
-                    q.put(("log", self.t("m_start_word")))
-                with wc_ctx as wc:
-                    for p in files:
-                        folder = out_dir or p.parent
-                        folder.mkdir(parents=True, exist_ok=True)
-                        target = unique_output_path(folder, p.stem)
-                        try:
-                            convert_one(p, target, wc)
-                            last_folder = folder
-                            q.put(("log", self.t("m_ok_named", name=p.name, out=target.name)))
-                        except Exception as e:
-                            errors += 1
-                            q.put(("log", self.t("m_error_file", name=p.name, e=e)))
-                        done += 1
-                        q.put(("progress", done))
+                for p in files:
+                    folder = out_dir or p.parent
+                    folder.mkdir(parents=True, exist_ok=True)
+                    target = unique_output_path(folder, p.stem)
+                    try:
+                        convert_one(p, target)
+                        last_folder = folder
+                        q.put(("log", self.t("m_ok_named", name=p.name, out=target.name)))
+                    except Exception as e:
+                        errors += 1
+                        q.put(("log", self.t("m_error_file", name=p.name, e=e)))
+                    done += 1
+                    q.put(("progress", done))
         except Exception as e:
             errors += 1
             q.put(("log", self.t("m_generic_error", e=e)))
-            q.put(("log", self.t("m_word_hint")))
         finally:
             q.put(("done", {"errors": errors, "folder": str(last_folder) if last_folder else None}))
 

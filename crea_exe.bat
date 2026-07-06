@@ -14,6 +14,9 @@ if not exist ".venv\Scripts\python.exe" (
 
 call ".venv\Scripts\activate.bat"
 
+REM Assicura che tutte le librerie del progetto siano installate
+pip install -r requirements.txt
+
 REM Installa PyInstaller se manca
 python -c "import PyInstaller" 2>nul
 if errorlevel 1 pip install pyinstaller

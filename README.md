@@ -19,12 +19,14 @@ Interfaccia disponibile in **Italiano** e **Inglese** (selettore 🌐 in alto a 
 ## Scheda “Converti in PDF”
 
 - **Immagini** (JPG, PNG, BMP, GIF, TIFF, WEBP, ICO, JFIF…) → convertite con Pillow
-- **Documenti Word** (DOC, DOCX, DOCM, RTF, ODT) → convertiti tramite Microsoft Word (fedeltà massima)
-- **Anteprima del PDF risultante** (non del file caricato): per le immagini mostra come apparirà sulla pagina scelta e si aggiorna quando cambi le opzioni; per i Word genera in background la vera anteprima del PDF
+- **Documenti Word** (DOCX, DOCM) → convertiti **senza Microsoft Word** (mammoth + xhtml2pdf), quindi funziona su qualsiasi PC. *(I formati più vecchi .doc/.rtf/.odt non sono supportati: salvali prima come .docx.)*
+- **Anteprima del PDF risultante** (non del file caricato): per le immagini mostra come apparirà sulla pagina scelta e si aggiorna quando cambi le opzioni; per i documenti genera in background la vera anteprima del PDF
+- **Rotazione** dall'anteprima con i pulsanti ⟲ ⟳: il PDF finale viene ruotato di conseguenza e la pagina si orienta automaticamente
+- **Auto-orientamento EXIF**: molte foto da telefono vengono raddrizzate automaticamente
 - Spazio **diviso a metà** tra elenco file e anteprima, ridimensionabile con la finestra
 - **Trascinamento (drag & drop)** di file e cartelle nella finestra
-- **Unisci tutti i file in un unico PDF** (immagini + Word insieme, nell'ordine dell'elenco)
-- **Riordina i file** con i pulsanti ▲ ▼ (utile per l'unione)
+- **Unisci tutti i file in un unico PDF** (immagini + documenti insieme, nell'ordine dell'elenco)
+- **Riordina i file** con i pulsanti ▲ ▼ **o trascinando il nome** nell'elenco
 - **Formato pagina immagini**: *Adatta all'immagine*, *A4* o *Lettera* (con orientamento automatico)
 - Scelta della **cartella di destinazione** (di default la stessa dei file di origine)
 
@@ -47,14 +49,13 @@ Interfaccia disponibile in **Italiano** e **Inglese** (selettore 🌐 in alto a 
 
 - **Windows**
 - Per l'uso dal codice: **Python 3** nel PATH.
-- **Microsoft Word** installato (solo per convertire i documenti Word; immagini e
-  divisione PDF funzionano comunque).
+- **Nessun altro programma**: la conversione Word→PDF non richiede Microsoft Word.
 
 ## Portare il programma su un altro computer
 
 **Modo più semplice:** copia il solo file `dist\Convertitore PDF.exe`
 (es. su una chiavetta USB). Sull'altro PC basta un doppio clic, senza installare
-Python né altro. *(Per i documenti Word serve comunque Microsoft Word installato.)*
+Python né Microsoft Word: la conversione dei documenti funziona comunque.
 
 ## Ricreare l'eseguibile
 
@@ -99,5 +100,5 @@ chi scarica trova sia il codice sia il programma pronto.
 
 ## Librerie usate
 
-Pillow (immagini) · comtypes (Word) · tkinterdnd2 (drag & drop) ·
-pypdf (unione/divisione PDF) · pypdfium2 (anteprima pagine PDF).
+Pillow (immagini) · mammoth + xhtml2pdf (Word→PDF senza Word) · tkinterdnd2 (drag & drop) ·
+pypdf (unione/divisione/rotazione PDF) · pypdfium2 (anteprima pagine PDF).
