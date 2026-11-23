@@ -102,3 +102,5 @@ chi scarica trova sia il codice sia il programma pronto.
 
 Pillow (immagini) · mammoth + xhtml2pdf (Word→PDF senza Word) · tkinterdnd2 (drag & drop) ·
 pypdf (unione/divisione/rotazione PDF) · pypdfium2 (anteprima pagine PDF).
+
+--- 
